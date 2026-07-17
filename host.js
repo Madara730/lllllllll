@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { mouse, Point, screen } = require('@nut-tree/nut-js');
+const { mouse, Point, screen } = require('@nut-tree-fork/nut-js');
 
 const app = express();
 const port = 4000;

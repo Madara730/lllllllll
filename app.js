@@ -404,11 +404,45 @@ function setupTapOverlay() {
   if (!overlay) return;
   const onTap = e => {
     e.preventDefault();
+    const video = $('viewer-video');
     const rect = overlay.getBoundingClientRect();
     const cx = e.touches ? e.touches[0].clientX : e.clientX;
     const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    const nx = (cx - rect.left) / rect.width;
-    const ny = (cy - rect.top)  / rect.height;
+
+    let nx = 0, ny = 0;
+    if (video && video.videoWidth && video.videoHeight) {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const cw = rect.width;
+      const ch = rect.height;
+
+      const containerRatio = cw / ch;
+      const videoRatio = vw / vh;
+      
+      let renderedW = cw, renderedH = ch, offsetX = 0, offsetY = 0;
+
+      if (containerRatio > videoRatio) {
+        // Pillarboxed (black bars left/right)
+        renderedH = ch;
+        renderedW = ch * videoRatio;
+        offsetX = (cw - renderedW) / 2;
+      } else {
+        // Letterboxed (black bars top/bottom)
+        renderedW = cw;
+        renderedH = cw / videoRatio;
+        offsetY = (ch - renderedH) / 2;
+      }
+
+      const tapX = cx - rect.left - offsetX;
+      const tapY = cy - rect.top - offsetY;
+
+      nx = Math.max(0, Math.min(1, tapX / renderedW));
+      ny = Math.max(0, Math.min(1, tapY / renderedH));
+    } else {
+      // Fallback
+      nx = (cx - rect.left) / rect.width;
+      ny = (cy - rect.top)  / rect.height;
+    }
 
     const rip = $('tap-ripple'), wrap = $('viewer-video-wrap');
     if (rip && wrap) {
