@@ -79,12 +79,25 @@ function toggleHidden(el, hidden) {
 // ── Role selection ─────────────────────────────────────────
 function selectRole(role) {
   State.role = role;
+
+  // Check PeerJS loaded from CDN
+  if (typeof Peer === 'undefined') {
+    alert('PeerJS failed to load. Check your internet connection and refresh the page.');
+    return;
+  }
+
   if (role === 'sharer') {
-    initSharer();
-    showScreen('sharer-screen');
+    showScreen('sharer-screen');   // Switch screen FIRST
+    try { initSharer(); } catch(e) {
+      console.error('initSharer error:', e);
+      showToast('⚠️ Error: ' + e.message);
+    }
   } else {
-    initViewer();
-    showScreen('viewer-screen');
+    showScreen('viewer-screen');   // Switch screen FIRST
+    try { initViewer(); } catch(e) {
+      console.error('initViewer error:', e);
+      showToast('⚠️ Error: ' + e.message);
+    }
   }
 }
 
