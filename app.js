@@ -1,103 +1,127 @@
 /* ============================================================
-   JumperCast — Application Logic
+   JumperCast — Application Logic v3
    WebRTC Screen Share + Remote Control via PeerJS
    ============================================================ */
 
 'use strict';
 
-// ── Constants ──────────────────────────────────────────────
+// ── PeerJS Config (default cloud broker) ──────────────────
 const PEERJS_CONFIG = {
-  // Use PeerJS default cloud broker — most reliable, no manual host needed
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
+      { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
     ]
   }
 };
 
-const JUMPER_PREFIX = 'jc-';   // Room ID namespace prefix
+const PREFIX = 'jc-';
 
-// ── App State ──────────────────────────────────────────────
-const State = {
-  role: null,            // 'sharer' | 'viewer'
-  peer: null,            // PeerJS Peer instance
-  peerId: null,          // Our PeerJS ID
-  roomId: null,          // Human-facing room ID (e.g. "screen-abc123")
-
-  // Sharer state
-  stream: null,          // MediaStream from getDisplayMedia
-  connectedViewers: {},  // peerId → { conn, dataConn }
-  remoteControlEnabled: false,
-  sharingActive: false,
-
-  // Viewer state
-  hostConn: null,        // MediaConnection to sharer
-  dataConn: null,        // DataConnection to sharer
+// ── State ──────────────────────────────────────────────────
+const S = {
+  role: null, peer: null, roomId: null,
+  stream: null, viewers: {}, remoteCtrl: false,
+  hostConn: null, dataConn: null
 };
 
-// ── Utility helpers ────────────────────────────────────────
-function uid(len = 6) {
-  return Math.random().toString(36).slice(2, 2 + len);
-}
+// ── Helpers ────────────────────────────────────────────────
+const uid  = (n=6) => Math.random().toString(36).slice(2, 2+n);
+const $    = id => document.getElementById(id);
+const hide = (id, v) => { const el = $(id) || id; if(el) el.classList.toggle('hidden', v); };
 
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
+  const el = $(id);
+  if (el) el.classList.add('active');
+  else console.error('Screen not found:', id);
 }
 
-function showToast(msg, duration = 2800) {
-  const el = document.getElementById('toast');
+function toast(msg, ms=3000) {
+  const el = $('toast');
   el.textContent = msg;
   el.classList.add('show');
-  clearTimeout(showToast._t);
-  showToast._t = setTimeout(() => el.classList.remove('show'), duration);
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), ms);
 }
 
-function setStatusBadge(elementId, state, text) {
-  const el = document.getElementById(elementId);
-  el.className = `status-badge ${state}`;
-  el.textContent = text;
+function badge(id, cls, txt) {
+  const el = $(id);
+  if (!el) return;
+  el.className = 'status-badge ' + cls;
+  el.textContent = txt;
 }
 
-function toggleHidden(el, hidden) {
-  if (typeof el === 'string') el = document.getElementById(el);
-  if (hidden) el.classList.add('hidden');
-  else el.classList.remove('hidden');
+function isMobile() {
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 }
 
-// ── Role selection ─────────────────────────────────────────
+function buildUrl(roomId) {
+  return window.location.origin + window.location.pathname + '?room=' + encodeURIComponent(roomId);
+}
+
+// ── QR render (safe — won't crash if lib not loaded) ──────
+function renderQR(roomId) {
+  const box = $('qr-container');
+  if (!box) return;
+  box.innerHTML = '';
+  if (typeof QRCode === 'undefined') {
+    box.innerHTML = '<p style="color:#6b7280;font-size:.8rem;text-align:center">QR unavailable — copy link instead</p>';
+    return;
+  }
+  const canvas = document.createElement('canvas');
+  box.appendChild(canvas);
+  QRCode.toCanvas(canvas, buildUrl(roomId), { width: 132, margin: 1, color: { dark:'#000', light:'#fff' } }, e => {
+    if (e) console.warn('QR error:', e);
+  });
+}
+
+// ── Copy helpers ───────────────────────────────────────────
+function copyRoomId() {
+  if (!S.roomId) return;
+  navigator.clipboard.writeText(S.roomId).then(() => toast('Room ID copied!'));
+}
+function copyLink() {
+  if (!S.roomId) return;
+  navigator.clipboard.writeText(buildUrl(S.roomId)).then(() => toast('Link copied! Send to phone.'));
+}
+
+// ── URL param auto-connect ─────────────────────────────────
+function checkUrlParams() {
+  const room = new URLSearchParams(location.search).get('room');
+  if (room) {
+    selectRole('viewer');
+    const inp = $('room-input');
+    if (inp) inp.value = room;
+    setTimeout(() => connectToRoom(), 1000);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  ROLE SELECTION
+// ═══════════════════════════════════════════════════════════
 function selectRole(role) {
-  State.role = role;
+  console.log('[JC] selectRole:', role);
 
-  // Check PeerJS loaded from CDN
   if (typeof Peer === 'undefined') {
-    alert('PeerJS failed to load. Check your internet connection and refresh the page.');
+    alert('PeerJS library did not load. Please check your internet and refresh.');
     return;
   }
 
+  S.role = role;
+
   if (role === 'sharer') {
-    showScreen('sharer-screen');   // Switch screen FIRST
-    try { initSharer(); } catch(e) {
-      console.error('initSharer error:', e);
-      showToast('⚠️ Error: ' + e.message);
+    // Block on mobile — getDisplayMedia not supported
+    if (isMobile()) {
+      alert('Screen sharing only works on a desktop/laptop browser.\n\nOn your phone, use "View & Control" instead!');
+      return;
     }
+    showScreen('sharer-screen');
+    initSharer();
   } else {
-    showScreen('viewer-screen');   // Switch screen FIRST
-    try { initViewer(); } catch(e) {
-      console.error('initViewer error:', e);
-      showToast('⚠️ Error: ' + e.message);
-    }
+    showScreen('viewer-screen');
+    initViewer();
   }
 }
 
@@ -106,629 +130,351 @@ function goHome() {
   showScreen('landing-screen');
 }
 
-// ── Generate unique room ID + PeerJS peer ID ───────────────
-function makeRoomId() {
-  return 'screen-' + uid(6);
-}
-
-function roomToPeerId(roomId) {
-  // PeerJS peer ID = namespace prefix + room ID
-  return JUMPER_PREFIX + roomId;
-}
-
-function peerIdToRoom(peerId) {
-  return peerId.startsWith(JUMPER_PREFIX) ? peerId.slice(JUMPER_PREFIX.length) : peerId;
-}
-
-// ── QR Code ────────────────────────────────────────────────
-function renderQR(text) {
-  const container = document.getElementById('qr-container');
-  container.innerHTML = '';
-  const canvas = document.createElement('canvas');
-  container.appendChild(canvas);
-  QRCode.toCanvas(canvas, text, {
-    width: 132,
-    margin: 1,
-    color: { dark: '#000000', light: '#ffffff' }
-  }, err => {
-    if (err) console.error('QR error:', err);
-  });
-}
-
-// ── Copy helpers ───────────────────────────────────────────
-function copyRoomId() {
-  navigator.clipboard.writeText(State.roomId).then(() => showToast('Room ID copied!'));
-}
-
-function copyLink() {
-  const url = buildShareUrl(State.roomId);
-  navigator.clipboard.writeText(url).then(() => showToast('Link copied!'));
-}
-
-function buildShareUrl(roomId) {
-  const base = window.location.origin + window.location.pathname;
-  return `${base}?room=${encodeURIComponent(roomId)}`;
-}
-
-// ── Check URL params (phone scanning QR) ──────────────────
-function checkUrlParams() {
-  const params = new URLSearchParams(window.location.search);
-  const room = params.get('room');
-  if (room) {
-    selectRole('viewer');
-    document.getElementById('room-input').value = room;
-    // Auto-connect after a short delay so peer is ready
-    setTimeout(() => connectToRoom(), 800);
-  }
-}
-
-// ══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 //  SHARER (LAPTOP) LOGIC
-// ══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 function initSharer() {
-  const roomId = makeRoomId();
-  State.roomId = roomId;
-  const myPeerId = roomToPeerId(roomId);
+  console.log('[Sharer] init');
 
-  // ✅ Show Room ID + QR IMMEDIATELY — don't wait for PeerJS
-  document.getElementById('room-id-display').textContent = roomId;
-  renderQR(buildShareUrl(roomId));
-  toggleHidden('room-waiting', true);
-  toggleHidden('room-info', false);
-  setStatusBadge('sharer-status-badge', 'idle', 'Connecting…');
+  // 1. Generate room ID immediately
+  const roomId = 'screen-' + uid(6);
+  S.roomId = roomId;
+  const peerId = PREFIX + roomId;
 
-  State.peer = new Peer(myPeerId, PEERJS_CONFIG);
+  // 2. Show room ID + QR RIGHT AWAY (no waiting for PeerJS)
+  const display = $('room-id-display');
+  if (display) display.textContent = roomId;
+  renderQR(roomId);
+  hide('room-waiting', true);
+  hide('room-info', false);
+  badge('sharer-status-badge', 'idle', 'Connecting…');
 
-  State.peer.on('open', id => {
-    console.log('[Sharer] Peer open:', id);
-    setStatusBadge('sharer-status-badge', 'sharing', 'Ready — waiting for viewers');
-    showToast('✅ Room ready! Share the QR or link.');
-  });
+  console.log('[Sharer] Room ID:', roomId, '| Peer ID:', peerId);
 
-  // Incoming DATA connections (control channel from viewers)
-  State.peer.on('connection', dataConn => {
-    handleIncomingDataConnection(dataConn);
-  });
-
-  // Incoming CALL connections (viewers request stream)
-  State.peer.on('call', call => {
-    handleIncomingCall(call);
-  });
-
-  State.peer.on('error', err => {
-    console.error('[Sharer] PeerJS error:', err);
-    if (err.type === 'unavailable-id') {
-      // ID taken — try a new one
-      State.peer.destroy();
-      initSharer();
-    } else if (err.type === 'network' || err.type === 'server-error') {
-      setStatusBadge('sharer-status-badge', 'error', 'Network error — retrying…');
-      setTimeout(() => { if (State.peer && !State.peer.destroyed) State.peer.reconnect(); }, 2000);
-    } else {
-      showToast('⚠️ ' + err.message);
-      setStatusBadge('sharer-status-badge', 'error', 'Error');
-    }
-  });
-
-  State.peer.on('disconnected', () => {
-    console.warn('[Sharer] Peer disconnected, reconnecting…');
-    setStatusBadge('sharer-status-badge', 'idle', 'Reconnecting…');
-    if (!State.peer.destroyed) State.peer.reconnect();
-  });
-}
-
-function handleIncomingDataConnection(dataConn) {
-  const viewerPeerId = dataConn.peer;
-  console.log('[Sharer] Data connection from:', viewerPeerId);
-
-  dataConn.on('open', () => {
-    // Register viewer
-    if (!State.connectedViewers[viewerPeerId]) {
-      State.connectedViewers[viewerPeerId] = { dataConn };
-    } else {
-      State.connectedViewers[viewerPeerId].dataConn = dataConn;
-    }
-    updateDeviceList();
-    dataConn.send({ type: 'welcome', remoteControlEnabled: State.remoteControlEnabled });
-    setStatusBadge('sharer-status-badge', 'connected',
-      `${Object.keys(State.connectedViewers).length} connected`);
-  });
-
-  dataConn.on('data', msg => {
-    handleSharerMessage(msg, viewerPeerId);
-  });
-
-  dataConn.on('close', () => {
-    delete State.connectedViewers[viewerPeerId];
-    updateDeviceList();
-    const count = Object.keys(State.connectedViewers).length;
-    setStatusBadge('sharer-status-badge',
-      count > 0 ? 'connected' : 'sharing',
-      count > 0 ? `${count} connected` : 'Sharing');
-    showToast('A viewer disconnected');
-  });
-
-  dataConn.on('error', err => console.error('[Sharer] DataConn error:', err));
-}
-
-function handleIncomingCall(call) {
-  const viewerPeerId = call.peer;
-  console.log('[Sharer] Incoming call from:', viewerPeerId);
-
-  if (!State.stream) {
-    console.warn('[Sharer] No stream to answer call with');
-    call.close();
+  // 3. Connect to PeerJS broker
+  try {
+    S.peer = new Peer(peerId, PEERJS_CONFIG);
+  } catch(e) {
+    console.error('[Sharer] Peer() failed:', e);
+    toast('⚠️ PeerJS error: ' + e.message);
+    badge('sharer-status-badge', 'error', 'Error');
     return;
   }
 
-  call.answer(State.stream);
+  S.peer.on('open', id => {
+    console.log('[Sharer] Peer open:', id);
+    badge('sharer-status-badge', 'sharing', 'Ready — share QR with phone');
+    toast('✅ Room ready!');
+  });
 
-  if (!State.connectedViewers[viewerPeerId]) {
-    State.connectedViewers[viewerPeerId] = {};
-  }
-  State.connectedViewers[viewerPeerId].mediaConn = call;
+  S.peer.on('connection', dc => handleDataConn(dc));
+  S.peer.on('call',       call => handleCall(call));
 
-  call.on('close', () => {
-    if (State.connectedViewers[viewerPeerId]) {
-      delete State.connectedViewers[viewerPeerId].mediaConn;
+  S.peer.on('error', err => {
+    console.error('[Sharer] PeerJS error:', err.type, err);
+    if (err.type === 'unavailable-id') {
+      S.peer.destroy();
+      initSharer();   // try new ID
+    } else {
+      badge('sharer-status-badge', 'error', 'Error — retrying…');
+      setTimeout(() => { if (S.peer && !S.peer.destroyed) S.peer.reconnect(); }, 2000);
     }
+  });
+
+  S.peer.on('disconnected', () => {
+    badge('sharer-status-badge', 'idle', 'Reconnecting…');
+    if (S.peer && !S.peer.destroyed) S.peer.reconnect();
   });
 }
 
-function handleSharerMessage(msg, fromPeerId) {
-  if (!msg || !msg.type) return;
+function handleDataConn(dc) {
+  const vid = dc.peer;
+  dc.on('open', () => {
+    if (!S.viewers[vid]) S.viewers[vid] = {};
+    S.viewers[vid].dc = dc;
+    updateDeviceList();
+    dc.send({ type: 'welcome', remoteCtrl: S.remoteCtrl });
+    badge('sharer-status-badge', 'connected', Object.keys(S.viewers).length + ' connected');
+  });
+  dc.on('data', msg => onSharerMsg(msg));
+  dc.on('close', () => {
+    delete S.viewers[vid];
+    updateDeviceList();
+    const n = Object.keys(S.viewers).length;
+    badge('sharer-status-badge', n ? 'connected' : 'sharing', n ? n + ' connected' : 'Sharing');
+  });
+  dc.on('error', e => console.error('[Sharer] dc error:', e));
+}
 
-  switch (msg.type) {
-    case 'tap':
-      if (State.remoteControlEnabled) {
-        simulateClick(msg.x, msg.y, msg.screenW, msg.screenH);
-      }
-      break;
-    case 'scroll':
-      if (State.remoteControlEnabled) {
-        // Scroll is visual-only feedback in browser context
-        // (actual scroll simulation requires native app; we show feedback)
-        showClickFlash(msg.x, msg.y);
-      }
-      break;
+function handleCall(call) {
+  if (!S.stream) { call.close(); return; }
+  call.answer(S.stream);
+  if (!S.viewers[call.peer]) S.viewers[call.peer] = {};
+  S.viewers[call.peer].mc = call;
+}
+
+function onSharerMsg(msg) {
+  if (!msg || !msg.type) return;
+  if (msg.type === 'tap' && S.remoteCtrl) {
+    flashClick(msg.x, msg.y);
+    console.log(`[Sharer] Remote tap (${(msg.x*100).toFixed(1)}%, ${(msg.y*100).toFixed(1)}%)`);
   }
 }
 
-// ── Screen Sharing ────────────────────────────────────────
+// ── Screen Share ───────────────────────────────────────────
 async function startSharing() {
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        cursor: 'always',
-        frameRate: { ideal: 30, max: 30 },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      },
+      video: { cursor: 'always', frameRate: { ideal: 30 } },
       audio: false
     });
+    S.stream = stream;
 
-    State.stream = stream;
-    State.sharingActive = true;
-
-    // Show preview
-    const video = document.getElementById('sharer-video');
-    video.srcObject = stream;
-    toggleHidden('sharer-placeholder', true);
-    toggleHidden('sharer-video', false);
-    document.getElementById('stream-quality').textContent = 'Live';
-
-    // Update buttons
-    toggleHidden('btn-start-share', true);
-    toggleHidden('btn-stop-share', false);
-    setStatusBadge('sharer-status-badge', 'sharing', 'Sharing');
-
-    // Handle user stopping via browser UI
-    stream.getVideoTracks()[0].addEventListener('ended', () => {
-      stopSharing();
-    });
-
-    // Notify any already-connected viewers
-    notifyViewers({ type: 'stream-started' });
-
-    showToast('Screen sharing started!');
-  } catch (err) {
-    console.error('[Sharer] getDisplayMedia error:', err);
-    if (err.name === 'NotAllowedError') {
-      showToast('Permission denied — please allow screen sharing');
-    } else if (err.name === 'NotSupportedError') {
-      showToast('Screen sharing not supported in this browser');
-    } else {
-      showToast('Failed to start sharing: ' + err.message);
-    }
+    const v = $('sharer-video');
+    v.srcObject = stream;
+    hide('sharer-placeholder', true);
+    hide('sharer-video', false);
+    $('stream-quality').textContent = 'Live';
+    hide('btn-start-share', true);
+    hide('btn-stop-share', false);
+    badge('sharer-status-badge', 'sharing', 'Sharing');
+    stream.getVideoTracks()[0].addEventListener('ended', stopSharing);
+    notifyAll({ type: 'stream-started' });
+    toast('Sharing started!');
+  } catch(e) {
+    console.error('[Sharer] getDisplayMedia:', e);
+    const msg = e.name === 'NotAllowedError' ? 'Screen capture permission denied'
+              : e.name === 'NotSupportedError' ? 'Screen sharing not supported here'
+              : e.message;
+    toast('⚠️ ' + msg);
   }
 }
 
 function stopSharing() {
-  if (State.stream) {
-    State.stream.getTracks().forEach(t => t.stop());
-    State.stream = null;
-  }
-  State.sharingActive = false;
-
-  const video = document.getElementById('sharer-video');
-  video.srcObject = null;
-  toggleHidden('sharer-video', true);
-  toggleHidden('sharer-placeholder', false);
-  document.getElementById('stream-quality').textContent = '';
-
-  toggleHidden('btn-stop-share', true);
-  toggleHidden('btn-start-share', false);
-  setStatusBadge('sharer-status-badge', 'idle', 'Stopped');
-
-  notifyViewers({ type: 'stream-stopped' });
-  showToast('Sharing stopped');
+  if (S.stream) { S.stream.getTracks().forEach(t => t.stop()); S.stream = null; }
+  const v = $('sharer-video');
+  v.srcObject = null;
+  hide('sharer-video', true);
+  hide('sharer-placeholder', false);
+  $('stream-quality').textContent = '';
+  hide('btn-stop-share', true);
+  hide('btn-start-share', false);
+  badge('sharer-status-badge', 'idle', 'Stopped');
+  notifyAll({ type: 'stream-stopped' });
+  toast('Sharing stopped');
 }
 
-// ── Remote Control ────────────────────────────────────────
 function toggleRemoteControl() {
-  State.remoteControlEnabled = !State.remoteControlEnabled;
-  const toggle = document.getElementById('remote-ctrl-toggle');
-  toggle.setAttribute('data-enabled', State.remoteControlEnabled);
-  const bar = document.getElementById('sharer-remote-status');
-  toggleHidden(bar, !State.remoteControlEnabled);
-
-  notifyViewers({ type: 'remote-control-changed', enabled: State.remoteControlEnabled });
-  showToast(State.remoteControlEnabled
-    ? '✅ Remote control enabled'
-    : '🔒 Remote control disabled');
+  S.remoteCtrl = !S.remoteCtrl;
+  const t = $('remote-ctrl-toggle');
+  t.setAttribute('data-enabled', S.remoteCtrl);
+  hide('sharer-remote-status', !S.remoteCtrl);
+  notifyAll({ type: 'remote-ctrl', enabled: S.remoteCtrl });
+  toast(S.remoteCtrl ? '✅ Remote control ON' : '🔒 Remote control OFF');
 }
 
-function notifyViewers(msg) {
-  Object.values(State.connectedViewers).forEach(viewer => {
-    if (viewer.dataConn && viewer.dataConn.open) {
-      viewer.dataConn.send(msg);
-    }
-  });
+function notifyAll(msg) {
+  Object.values(S.viewers).forEach(v => { if (v.dc && v.dc.open) v.dc.send(msg); });
 }
 
-// ── Simulate click on laptop screen ──────────────────────
-function simulateClick(normX, normY, senderW, senderH) {
-  // normX, normY are 0..1 ratios of the viewer's video dimensions
-  // We show a flash on our local preview at the same ratio
-  const videoEl = document.getElementById('sharer-video');
-  const rect = videoEl.getBoundingClientRect();
-  const flashX = rect.left + normX * rect.width;
-  const flashY = rect.top + normY * rect.height;
-  showClickFlash(flashX, flashY);
-
-  // In a pure browser app we can't programmatically move the OS cursor.
-  // This would require a native helper (e.g., Electron, Tauri, PyAutoGUI).
-  // We show visual feedback + a browser-level click on the video element.
-  console.log(`[Sharer] Remote click at (${(normX*100).toFixed(1)}%, ${(normY*100).toFixed(1)}%)`);
-}
-
-function showClickFlash(x, y) {
-  const flash = document.getElementById('click-flash');
-  const wrap = document.getElementById('sharer-video-wrap');
-  const rect = wrap.getBoundingClientRect();
-
-  // Convert absolute coords to wrap-relative
-  const relX = typeof x === 'number' ? x - rect.left : 0;
-  const relY = typeof y === 'number' ? y - rect.top : 0;
-
-  flash.style.left = relX + 'px';
-  flash.style.top = relY + 'px';
+function flashClick(normX, normY) {
+  const wrap = $('sharer-video-wrap');
+  const flash = $('click-flash');
+  if (!wrap || !flash) return;
+  const r = wrap.getBoundingClientRect();
+  flash.style.left = (normX * r.width) + 'px';
+  flash.style.top  = (normY * r.height) + 'px';
   flash.classList.remove('hidden');
   flash.style.animation = 'none';
-  requestAnimationFrame(() => {
-    flash.style.animation = '';
-    flash.classList.remove('hidden');
-  });
-  clearTimeout(showClickFlash._t);
-  showClickFlash._t = setTimeout(() => flash.classList.add('hidden'), 600);
+  requestAnimationFrame(() => { flash.style.animation = ''; });
+  clearTimeout(flashClick._t);
+  flashClick._t = setTimeout(() => flash.classList.add('hidden'), 600);
 }
 
-// ── Device list UI ────────────────────────────────────────
 function updateDeviceList() {
-  const list = document.getElementById('device-list');
-  const viewers = Object.keys(State.connectedViewers);
-
-  if (viewers.length === 0) {
-    list.innerHTML = '<div class="no-devices">No devices connected yet</div>';
-    return;
-  }
-
-  list.innerHTML = viewers.map((pid, i) => `
-    <div class="device-item">
-      <div class="device-dot"></div>
-      <div class="device-name">Viewer ${i + 1}</div>
-      <div class="device-role">📱 Remote</div>
-    </div>
-  `).join('');
+  const list = $('device-list');
+  const keys = Object.keys(S.viewers);
+  list.innerHTML = keys.length
+    ? keys.map((_, i) => `<div class="device-item"><div class="device-dot"></div><div class="device-name">Viewer ${i+1}</div><div class="device-role">📱 Remote</div></div>`).join('')
+    : '<div class="no-devices">No devices connected yet</div>';
 }
 
-// ══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 //  VIEWER (PHONE) LOGIC
-// ══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 function initViewer() {
-  // Viewer gets a random peer ID (not a room ID)
-  State.peer = new Peer(JUMPER_PREFIX + 'v-' + uid(10), PEERJS_CONFIG);
-
-  State.peer.on('open', id => {
-    console.log('[Viewer] Peer open:', id);
-  });
-
-  State.peer.on('error', err => {
-    console.error('[Viewer] PeerJS error:', err);
-    showViewerError('Connection error: ' + err.message);
-  });
+  console.log('[Viewer] init');
+  badge('viewer-status-badge', 'idle', 'Ready');
+  S.peer = new Peer(PREFIX + 'v-' + uid(10), PEERJS_CONFIG);
+  S.peer.on('open', id => console.log('[Viewer] Peer open:', id));
+  S.peer.on('error', e => { console.error('[Viewer] error:', e); showViewerError('Connection error: ' + e.message); });
 }
 
 function connectToRoom() {
-  const input = document.getElementById('room-input').value.trim();
-  if (!input) {
-    showViewerError('Please enter a room ID');
-    return;
-  }
+  let input = ($('room-input').value || '').trim();
+  if (!input) { showViewerError('Please enter a room ID'); return; }
 
-  // Support entering just the ID or the full URL
-  let roomId = input;
+  // Accept full URL or just the ID
   if (input.includes('?room=')) {
-    try { roomId = new URL(input).searchParams.get('room'); } catch {}
+    try { input = new URL(input).searchParams.get('room'); } catch {}
   }
 
-  State.roomId = roomId;
-  const hostPeerId = roomToPeerId(roomId);
+  S.roomId = input;
+  const hostId = PREFIX + input;
+  hide('viewer-error', true);
+  badge('viewer-status-badge', 'connected', 'Connecting…');
+  $('viewer-status-text').textContent = 'Connecting to host…';
 
-  toggleHidden('viewer-error', true);
-  setStatusBadge('viewer-status-badge', 'connected', 'Connecting…');
-  document.getElementById('viewer-status-text').textContent = 'Connecting to host…';
+  const go = () => {
+    const dc = S.peer.connect(hostId, { reliable: true });
+    S.dataConn = dc;
 
-  // Wait for peer to be ready
-  const doConnect = () => {
-    // 1. Open data channel
-    const dataConn = State.peer.connect(hostPeerId, { reliable: true });
-    State.dataConn = dataConn;
+    dc.on('open', () => {
+      dc.send({ type: 'hello', id: S.peer.id });
 
-    dataConn.on('open', () => {
-      console.log('[Viewer] Data channel open');
-      dataConn.send({ type: 'viewer-hello', viewerId: State.peer.id });
+      // Call sharer to get stream
+      const silentStream = makeSilentStream();
+      const call = S.peer.call(hostId, silentStream);
+      S.hostConn = call;
 
-      // 2. Call to request stream
-      const call = State.peer.call(hostPeerId, createSilentStream());
-      State.hostConn = call;
-
-      call.on('stream', remoteStream => {
-        console.log('[Viewer] Got stream');
-        const video = document.getElementById('viewer-video');
-        video.srcObject = remoteStream;
-        video.onloadedmetadata = () => video.play().catch(() => {});
-
-        setStatusBadge('viewer-status-badge', 'sharing', 'Receiving');
-        document.getElementById('viewer-status-text').textContent = 'Receiving screen';
-
-        // Switch to live panel
-        toggleHidden('viewer-connect-panel', true);
-        toggleHidden('viewer-live-panel', false);
-        showToast('Connected! Tap to control.');
+      call.on('stream', remote => {
+        const v = $('viewer-video');
+        v.srcObject = remote;
+        v.onloadedmetadata = () => v.play().catch(()=>{});
+        badge('viewer-status-badge', 'sharing', 'Receiving');
+        $('viewer-status-text').textContent = 'Receiving screen';
+        hide('viewer-connect-panel', true);
+        hide('viewer-live-panel', false);
+        toast('Connected! Tap to control.');
       });
 
-      call.on('close', () => {
-        showToast('Host ended sharing');
-        disconnectViewer();
-      });
-
-      call.on('error', err => {
-        console.error('[Viewer] Call error:', err);
-        showViewerError('Stream error: ' + err.message);
-      });
+      call.on('close', () => { toast('Host ended sharing'); disconnectViewer(); });
+      call.on('error', e => showViewerError('Stream error: ' + e.message));
     });
 
-    dataConn.on('data', msg => {
-      handleViewerMessage(msg);
-    });
-
-    dataConn.on('close', () => {
-      showToast('Host disconnected');
-      disconnectViewer();
-    });
-
-    dataConn.on('error', err => {
-      console.error('[Viewer] DataConn error:', err);
-      showViewerError('Connection failed. Is the room ID correct?');
-      setStatusBadge('viewer-status-badge', 'error', 'Error');
-    });
+    dc.on('data', msg => onViewerMsg(msg));
+    dc.on('close', () => { toast('Host disconnected'); disconnectViewer(); });
+    dc.on('error', e => { console.error('[Viewer] dc error:', e); showViewerError('Could not connect. Check the room ID.'); });
   };
 
-  if (State.peer && State.peer.id) {
-    doConnect();
-  } else if (State.peer) {
-    State.peer.on('open', doConnect);
-  } else {
-    showViewerError('Peer not ready — please refresh');
-  }
+  if (S.peer && S.peer.id) go();
+  else if (S.peer) S.peer.once('open', go);
+  else showViewerError('Not ready — please refresh');
 }
 
-// PeerJS requires us to "call" with a stream — send silence/blank if we have no stream
-function createSilentStream() {
+function makeSilentStream() {
   try {
     const ctx = new AudioContext();
     const dest = ctx.createMediaStreamDestination();
-    const osc = ctx.createOscillator();
-    osc.connect(dest);
-    osc.start();
-    // Return just the audio stream (no video needed from viewer side)
+    ctx.createOscillator().connect(dest);
     return dest.stream;
   } catch {
-    // Fallback: create empty video stream
-    const canvas = document.createElement('canvas');
-    canvas.width = 1; canvas.height = 1;
-    return canvas.captureStream(1);
+    const c = document.createElement('canvas');
+    c.width = 1; c.height = 1;
+    return c.captureStream(1);
   }
 }
 
-function handleViewerMessage(msg) {
+function onViewerMsg(msg) {
   if (!msg || !msg.type) return;
-  switch (msg.type) {
-    case 'welcome':
-      console.log('[Viewer] Welcome, remote control:', msg.remoteControlEnabled);
-      updateTapOverlayHint(msg.remoteControlEnabled);
-      break;
-    case 'remote-control-changed':
-      updateTapOverlayHint(msg.enabled);
-      showToast(msg.enabled ? '🖱️ Remote control enabled by host' : '🔒 Remote control disabled');
-      break;
-    case 'stream-stopped':
-      showToast('Host stopped sharing');
-      document.getElementById('viewer-video').srcObject = null;
-      setStatusBadge('viewer-status-badge', 'idle', 'Paused');
-      document.getElementById('viewer-status-text').textContent = 'Host paused sharing';
-      break;
-    case 'stream-started':
-      setStatusBadge('viewer-status-badge', 'sharing', 'Receiving');
-      document.getElementById('viewer-status-text').textContent = 'Receiving screen';
-      break;
-  }
+  if (msg.type === 'welcome') updateTapHint(msg.remoteCtrl);
+  if (msg.type === 'remote-ctrl') { updateTapHint(msg.enabled); toast(msg.enabled ? '🖱️ Control enabled' : '🔒 Control disabled'); }
+  if (msg.type === 'stream-stopped') { badge('viewer-status-badge', 'idle', 'Paused'); $('viewer-status-text').textContent = 'Host paused sharing'; }
+  if (msg.type === 'stream-started') { badge('viewer-status-badge', 'sharing', 'Receiving'); }
 }
 
-function updateTapOverlayHint(remoteEnabled) {
-  const hint = document.getElementById('tap-hint');
-  if (remoteEnabled) {
-    hint.innerHTML = '<span class="tap-icon">🖱️</span><span>Tap to control laptop</span>';
-  } else {
-    hint.innerHTML = '<span class="tap-icon">👁️</span><span>View only — remote control off</span>';
-  }
+function updateTapHint(enabled) {
+  const h = $('tap-hint');
+  if (!h) return;
+  h.innerHTML = enabled
+    ? '<span class="tap-icon">🖱️</span><span>Tap to control laptop</span>'
+    : '<span class="tap-icon">👁️</span><span>View only</span>';
 }
 
 function disconnectViewer() {
-  if (State.hostConn) { State.hostConn.close(); State.hostConn = null; }
-  if (State.dataConn) { State.dataConn.close(); State.dataConn = null; }
-
-  const video = document.getElementById('viewer-video');
-  video.srcObject = null;
-
-  toggleHidden('viewer-live-panel', true);
-  toggleHidden('viewer-connect-panel', false);
-  setStatusBadge('viewer-status-badge', 'idle', 'Disconnected');
+  if (S.hostConn) { S.hostConn.close(); S.hostConn = null; }
+  if (S.dataConn) { S.dataConn.close(); S.dataConn = null; }
+  $('viewer-video').srcObject = null;
+  hide('viewer-live-panel', true);
+  hide('viewer-connect-panel', false);
+  badge('viewer-status-badge', 'idle', 'Disconnected');
 }
 
 function showViewerError(msg) {
-  const el = document.getElementById('viewer-error');
-  el.textContent = msg;
-  toggleHidden(el, false);
-  setStatusBadge('viewer-status-badge', 'error', 'Error');
+  const el = $('viewer-error');
+  if (el) { el.textContent = msg; hide(el, false); }
+  badge('viewer-status-badge', 'error', 'Error');
 }
 
-// ── Tap-to-control ────────────────────────────────────────
+// ── Tap overlay ────────────────────────────────────────────
 function setupTapOverlay() {
-  const overlay = document.getElementById('tap-overlay');
+  const overlay = $('tap-overlay');
+  if (!overlay) return;
 
-  const sendTap = (e) => {
+  const onTap = e => {
     e.preventDefault();
     const rect = overlay.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    const nx = (cx - rect.left) / rect.width;
+    const ny = (cy - rect.top)  / rect.height;
 
-    let clientX, clientY;
-    if (e.touches && e.touches.length > 0) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
-    } else {
-      clientX = e.clientX;
-      clientY = e.clientY;
+    // Ripple
+    const rip = $('tap-ripple');
+    const wrap = $('viewer-video-wrap');
+    if (rip && wrap) {
+      const wr = wrap.getBoundingClientRect();
+      rip.style.left = (cx - wr.left) + 'px';
+      rip.style.top  = (cy - wr.top)  + 'px';
+      rip.classList.remove('hidden');
+      rip.style.animation = 'none';
+      requestAnimationFrame(() => { rip.style.animation = ''; });
+      clearTimeout(onTap._rt);
+      onTap._rt = setTimeout(() => rip.classList.add('hidden'), 700);
     }
 
-    const normX = (clientX - rect.left) / rect.width;
-    const normY = (clientY - rect.top) / rect.height;
+    // Fade hint
+    const hint = $('tap-hint');
+    if (hint) { hint.style.opacity = '0'; setTimeout(() => { hint.style.display='none'; }, 300); }
 
-    // Show ripple
-    showTapRipple(clientX, clientY);
-
-    // Fade hint after first tap
-    const hint = document.getElementById('tap-hint');
-    if (hint) hint.style.opacity = '0';
-    setTimeout(() => { if (hint) hint.style.display = 'none'; }, 300);
-
-    if (State.dataConn && State.dataConn.open) {
-      State.dataConn.send({
-        type: 'tap',
-        x: normX,
-        y: normY,
-        screenW: rect.width,
-        screenH: rect.height
-      });
+    if (S.dataConn && S.dataConn.open) {
+      S.dataConn.send({ type: 'tap', x: nx, y: ny, screenW: rect.width, screenH: rect.height });
     }
   };
 
-  overlay.addEventListener('click', sendTap);
-  overlay.addEventListener('touchstart', sendTap, { passive: false });
+  overlay.addEventListener('click', onTap);
+  overlay.addEventListener('touchstart', onTap, { passive: false });
 }
 
-function showTapRipple(clientX, clientY) {
-  const ripple = document.getElementById('tap-ripple');
-  const wrap = document.getElementById('viewer-video-wrap');
-  const rect = wrap.getBoundingClientRect();
-
-  ripple.style.left = (clientX - rect.left) + 'px';
-  ripple.style.top  = (clientY - rect.top) + 'px';
-  ripple.classList.remove('hidden');
-  ripple.style.animation = 'none';
-  requestAnimationFrame(() => {
-    ripple.style.animation = '';
-  });
-  clearTimeout(showTapRipple._t);
-  showTapRipple._t = setTimeout(() => ripple.classList.add('hidden'), 700);
-}
-
-// ── Cleanup ───────────────────────────────────────────────
+// ── Cleanup ────────────────────────────────────────────────
 function cleanup() {
-  if (State.stream) {
-    State.stream.getTracks().forEach(t => t.stop());
-    State.stream = null;
-  }
-  if (State.peer && !State.peer.destroyed) {
-    State.peer.destroy();
-    State.peer = null;
-  }
-  Object.assign(State, {
-    role: null,
-    peerId: null,
-    roomId: null,
-    connectedViewers: {},
-    remoteControlEnabled: false,
-    sharingActive: false,
-    hostConn: null,
-    dataConn: null
-  });
+  if (S.stream) { S.stream.getTracks().forEach(t => t.stop()); }
+  if (S.peer && !S.peer.destroyed) S.peer.destroy();
+  Object.assign(S, { role:null, peer:null, roomId:null, stream:null, viewers:{}, remoteCtrl:false, hostConn:null, dataConn:null });
 
   // Reset sharer UI
-  document.getElementById('room-id-display').textContent = '';
-  document.getElementById('qr-container').innerHTML = '';
-  toggleHidden('room-waiting', false);
-  toggleHidden('room-info', true);
-  toggleHidden('btn-start-share', false);
-  toggleHidden('btn-stop-share', true);
-  document.getElementById('device-list').innerHTML = '<div class="no-devices">No devices connected yet</div>';
-  const toggle = document.getElementById('remote-ctrl-toggle');
-  toggle.setAttribute('data-enabled', false);
-  toggleHidden('sharer-remote-status', true);
-  const sharerVideo = document.getElementById('sharer-video');
-  sharerVideo.srcObject = null;
-  toggleHidden('sharer-video', true);
-  toggleHidden('sharer-placeholder', false);
+  const d = $('room-id-display'); if (d) d.textContent = '';
+  const q = $('qr-container'); if (q) q.innerHTML = '';
+  hide('room-waiting', false); hide('room-info', true);
+  hide('btn-start-share', false); hide('btn-stop-share', true);
+  const dl = $('device-list'); if (dl) dl.innerHTML = '<div class="no-devices">No devices connected yet</div>';
+  const rt = $('remote-ctrl-toggle'); if (rt) rt.setAttribute('data-enabled', false);
+  hide('sharer-remote-status', true);
+  const sv = $('sharer-video'); if (sv) sv.srcObject = null;
+  hide('sharer-video', true); hide('sharer-placeholder', false);
 
   // Reset viewer UI
-  document.getElementById('room-input').value = '';
-  toggleHidden('viewer-error', true);
-  toggleHidden('viewer-connect-panel', false);
-  toggleHidden('viewer-live-panel', true);
-  const viewerVideo = document.getElementById('viewer-video');
-  viewerVideo.srcObject = null;
+  const ri = $('room-input'); if (ri) ri.value = '';
+  hide('viewer-error', true);
+  hide('viewer-connect-panel', false); hide('viewer-live-panel', true);
+  const vv = $('viewer-video'); if (vv) vv.srcObject = null;
 }
 
-// ── Init ──────────────────────────────────────────────────
+// ── Boot ───────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Setup tap overlay (always, it's hidden until viewer mode)
   setupTapOverlay();
-
-  // Check if we arrived via QR / shared link
   checkUrlParams();
-
-  // Clean up peer on page unload
   window.addEventListener('beforeunload', () => {
-    if (State.peer && !State.peer.destroyed) State.peer.destroy();
+    if (S.peer && !S.peer.destroyed) S.peer.destroy();
   });
 });
