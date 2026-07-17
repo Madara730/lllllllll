@@ -273,6 +273,15 @@ function flashClick(normX, normY) {
   requestAnimationFrame(() => { flash.style.animation = ''; });
   clearTimeout(flashClick._t);
   flashClick._t = setTimeout(() => flash.classList.add('hidden'), 600);
+
+  // Send to local host proxy for OS-level control
+  fetch('http://localhost:4000/click', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ x: normX, y: normY })
+  }).catch(err => {
+    console.warn('[Sharer] Failed to reach local host proxy (is it running?)', err);
+  });
 }
 
 function updateDeviceList() {

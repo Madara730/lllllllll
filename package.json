@@ -1,11 +1,19 @@
 {
   "name": "jumpercast",
   "version": "1.0.0",
-  "description": "WebRTC screen sharing + remote control. No tunnels, no backend.",
+  "description": "WebRTC Screen Share + Remote Control",
   "private": true,
   "scripts": {
+    "start": "npx serve .",
+    "host": "node host.js",
+    "vercel-build": "echo 'No build step required'",
     "dev": "npx serve . -p 3000 --cors",
     "deploy": "npx vercel --prod"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5",
+    "@nut-tree/nut-js": "^3.1.2"
   },
   "keywords": ["webrtc", "screen-share", "remote-control", "peerjs"],
   "author": "",
