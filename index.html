@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>JumperCast – Screen Share & Remote Control</title>
+  <meta name="description" content="Real-time screen sharing and remote control over WebRTC. No tunnels, no IPs – just scan and connect." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- LANDING / ROLE SELECTION -->
+  <div id="landing-screen" class="screen active">
+    <div class="hero">
+      <div class="logo-wrap">
+        <div class="logo-icon">
+          <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="2" y="8" width="28" height="18" rx="3" stroke="currentColor" stroke-width="2.5"/>
+            <path d="M10 26v4M16 30H6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <rect x="26" y="18" width="12" height="20" rx="2" stroke="currentColor" stroke-width="2.5"/>
+            <circle cx="32" cy="34" r="1" fill="currentColor"/>
+          </svg>
+        </div>
+        <h1 class="logo-text">JumperCast</h1>
+      </div>
+      <p class="hero-tagline">Screen sharing + remote control.<br/>No setup. No tunnels. Just magic.</p>
+      <div class="role-cards">
+        <button class="role-card" id="btn-sharer" onclick="selectRole('sharer')">
+          <div class="role-icon">🖥️</div>
+          <div class="role-label">Share My Screen</div>
+          <div class="role-desc">I'm on the laptop / desktop</div>
+          <div class="role-arrow">→</div>
+        </button>
+        <button class="role-card" id="btn-viewer" onclick="selectRole('viewer')">
+          <div class="role-icon">📱</div>
+          <div class="role-label">View & Control</div>
+          <div class="role-desc">I'm on the phone / tablet</div>
+          <div class="role-arrow">→</div>
+        </button>
+      </div>
+      <p class="hero-footer">Powered by WebRTC · No data leaves your devices</p>
+    </div>
+  </div>
+
+  <!-- SHARER (LAPTOP) SCREEN -->
+  <div id="sharer-screen" class="screen">
+    <header class="top-bar">
+      <button class="back-btn" onclick="goHome()">← Back</button>
+      <span class="top-title">Sharing Mode</span>
+      <div id="sharer-status-badge" class="status-badge idle">Idle</div>
+    </header>
+
+    <div class="sharer-layout">
+      <!-- Left panel: controls -->
+      <div class="sharer-panel">
+        <div class="section-card" id="share-controls-card">
+          <h2 class="section-title">Screen Controls</h2>
+          <div class="btn-group">
+            <button class="btn btn-primary" id="btn-start-share" onclick="startSharing()">
+              <span class="btn-icon">▶</span> Share Screen
+            </button>
+            <button class="btn btn-danger hidden" id="btn-stop-share" onclick="stopSharing()">
+              <span class="btn-icon">⏹</span> Stop Sharing
+            </button>
+          </div>
+          <label class="toggle-row" id="remote-control-toggle-row">
+            <div class="toggle-info">
+              <span class="toggle-label">Phone Remote Control</span>
+              <span class="toggle-desc">Let phone clicks control your cursor</span>
+            </div>
+            <div class="toggle-switch" id="remote-ctrl-toggle" onclick="toggleRemoteControl()" data-enabled="false">
+              <div class="toggle-knob"></div>
+            </div>
+          </label>
+        </div>
+
+        <div class="section-card" id="room-card">
+          <h2 class="section-title">Room & QR Code</h2>
+          <div id="room-waiting" class="room-waiting">
+            <p>Start sharing to get your room code</p>
+          </div>
+          <div id="room-info" class="hidden">
+            <div class="room-id-row">
+              <span class="room-label">Room ID</span>
+              <div class="room-id-wrap">
+                <span id="room-id-display" class="room-id-text"></span>
+                <button class="copy-btn" onclick="copyRoomId()" title="Copy Room ID">📋</button>
+              </div>
+            </div>
+            <div id="qr-container" class="qr-container"></div>
+            <p class="qr-hint">Scan with phone or share the link</p>
+            <button class="btn btn-secondary full-width" id="btn-copy-link" onclick="copyLink()">
+              🔗 Copy Shareable Link
+            </button>
+          </div>
+        </div>
+
+        <div class="section-card">
+          <h2 class="section-title">Connected Devices</h2>
+          <div id="device-list" class="device-list">
+            <div class="no-devices">No devices connected yet</div>
+          </div>
+          <div id="sharer-remote-status" class="remote-status-bar hidden">
+            <span class="pulse-dot"></span>
+            <span>Remote control active</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right panel: preview -->
+      <div class="sharer-preview">
+        <div class="preview-header">
+          <span>Live Preview</span>
+          <span id="stream-quality" class="quality-badge"></span>
+        </div>
+        <div class="video-wrap" id="sharer-video-wrap">
+          <div class="video-placeholder" id="sharer-placeholder">
+            <div class="placeholder-icon">🖥️</div>
+            <p>Your screen will appear here after sharing starts</p>
+          </div>
+          <video id="sharer-video" autoplay muted playsinline class="hidden"></video>
+          <div id="click-flash" class="click-flash hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEWER (PHONE) SCREEN -->
+  <div id="viewer-screen" class="screen">
+    <header class="top-bar">
+      <button class="back-btn" onclick="goHome()">← Back</button>
+      <span class="top-title">Viewer Mode</span>
+      <div id="viewer-status-badge" class="status-badge idle">Idle</div>
+    </header>
+
+    <div class="viewer-layout">
+      <!-- Connect panel (shown before connecting) -->
+      <div id="viewer-connect-panel" class="viewer-connect-panel">
+        <div class="section-card">
+          <h2 class="section-title">Enter Room ID</h2>
+          <p class="section-desc">Type the room ID shown on the sharing device, or scan its QR code.</p>
+          <div class="input-row">
+            <input
+              type="text"
+              id="room-input"
+              class="room-input"
+              placeholder="e.g. screen-abc123"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck="false"
+            />
+            <button class="btn btn-primary" onclick="connectToRoom()">Connect</button>
+          </div>
+          <div id="viewer-error" class="error-msg hidden"></div>
+        </div>
+      </div>
+
+      <!-- Live video panel (shown after connecting) -->
+      <div id="viewer-live-panel" class="viewer-live-panel hidden">
+        <div class="viewer-video-wrap" id="viewer-video-wrap">
+          <video
+            id="viewer-video"
+            autoplay
+            playsinline
+            class="viewer-video"
+          ></video>
+          <!-- Tap overlay -->
+          <div id="tap-overlay" class="tap-overlay">
+            <div class="tap-overlay-hint" id="tap-hint">
+              <span class="tap-icon">👆</span>
+              <span>Tap anywhere to control</span>
+            </div>
+          </div>
+          <!-- Ripple element for tap feedback -->
+          <div id="tap-ripple" class="tap-ripple hidden"></div>
+        </div>
+        <div class="viewer-status-bar">
+          <div class="viewer-status-left">
+            <span class="pulse-dot green"></span>
+            <span id="viewer-status-text">Receiving screen…</span>
+          </div>
+          <button class="btn btn-danger-sm" onclick="disconnectViewer()">Disconnect</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Scripts -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
