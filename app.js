@@ -337,6 +337,7 @@ function connectToRoom() {
       call.on('stream', remote => {
         console.log('[Viewer] Got stream!');
         const v = $('viewer-video');
+        if (v) v.muted = true; // Mobile Safari/Chrome require muted for autoplay
         v.srcObject = remote;
         v.onloadedmetadata = () => v.play().catch(e => console.warn('play:', e));
 
