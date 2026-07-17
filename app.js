@@ -7,18 +7,11 @@
 
 // ── Constants ──────────────────────────────────────────────
 const PEERJS_CONFIG = {
-  // Uses PeerJS public cloud broker (free, no server needed)
-  // For production reliability, consider hosting your own PeerJS server
-  host: '0.peerjs.com',
-  port: 443,
-  secure: true,
-  path: '/',
+  // Use PeerJS default cloud broker — most reliable, no manual host needed
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      // Free TURN servers for NAT traversal (works across different networks)
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
@@ -164,18 +157,19 @@ function initSharer() {
   State.roomId = roomId;
   const myPeerId = roomToPeerId(roomId);
 
-  setStatusBadge('sharer-status-badge', 'idle', 'Waiting…');
+  // ✅ Show Room ID + QR IMMEDIATELY — don't wait for PeerJS
+  document.getElementById('room-id-display').textContent = roomId;
+  renderQR(buildShareUrl(roomId));
+  toggleHidden('room-waiting', true);
+  toggleHidden('room-info', false);
+  setStatusBadge('sharer-status-badge', 'idle', 'Connecting…');
 
   State.peer = new Peer(myPeerId, PEERJS_CONFIG);
 
   State.peer.on('open', id => {
     console.log('[Sharer] Peer open:', id);
-    // Reveal room info
-    document.getElementById('room-id-display').textContent = roomId;
-    renderQR(buildShareUrl(roomId));
-    toggleHidden('room-waiting', true);
-    toggleHidden('room-info', false);
-    setStatusBadge('sharer-status-badge', 'sharing', 'Ready');
+    setStatusBadge('sharer-status-badge', 'sharing', 'Ready — waiting for viewers');
+    showToast('✅ Room ready! Share the QR or link.');
   });
 
   // Incoming DATA connections (control channel from viewers)
@@ -194,14 +188,18 @@ function initSharer() {
       // ID taken — try a new one
       State.peer.destroy();
       initSharer();
+    } else if (err.type === 'network' || err.type === 'server-error') {
+      setStatusBadge('sharer-status-badge', 'error', 'Network error — retrying…');
+      setTimeout(() => { if (State.peer && !State.peer.destroyed) State.peer.reconnect(); }, 2000);
     } else {
-      showToast('Connection error: ' + err.message);
+      showToast('⚠️ ' + err.message);
       setStatusBadge('sharer-status-badge', 'error', 'Error');
     }
   });
 
   State.peer.on('disconnected', () => {
     console.warn('[Sharer] Peer disconnected, reconnecting…');
+    setStatusBadge('sharer-status-badge', 'idle', 'Reconnecting…');
     if (!State.peer.destroyed) State.peer.reconnect();
   });
 }
